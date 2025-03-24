@@ -98,36 +98,31 @@ with st.sidebar:
         st.header("Dataset Size")
         dataset_size = st.slider("Number of events to generate", 10, 500, 50, 10)
         
+        # Default start/end years with full range
+        start_year = st.number_input("Start Year", 1960, 2024, 1960)
+        end_year = st.number_input("End Year", 1960, 2024, 2024)
+        
+        st.header("Year Distribution")
+        year_distribution = st.selectbox(
+            "Distribution of events across years",
+            ["Even across all decades", "More recent events", "Random distribution"],
+            index=0
+        )
+        
         st.header("Cost Reduction Options")
-        st.info("💡 Adjust these settings to balance cost vs. dataset size")
+        st.info("💡 Smaller values = lower API costs")
         use_seed = st.checkbox("Use Seed for Consistency", value=True)
         consistency_seed = st.number_input("Consistency Seed", 1, 99999, 12345) if use_seed else None
-        max_api_calls = st.slider("Maximum API Calls", 1, 20, 5, help="Higher = more data but more expensive")
         
-        with st.expander("Advanced Generation Settings", expanded=False):
-            st.warning("If you're not getting enough events, increase these values:")
-            min_events_per_batch = st.slider("Minimum Events Per Batch", 5, 50, 25, 
-                                           help="Higher = more events per API call but may cause timeouts")
-            st.info(f"With current settings, you can generate approximately {min_events_per_batch * max_api_calls} events")
+        # Set a higher default for better coverage
+        max_api_calls = st.slider("Maximum API Calls", 1, 20, 7, help="Higher = better decade coverage, but more expensive")
         
     # Tab 4: Advanced Settings
     with tab4:
         st.header("Performance Options")
-        parallel_workers = st.slider("Parallel API calls", 1, 4, 2)
-        batch_size = st.slider("Events per API call", 10, 50, 30, help="Higher = fewer API calls but might time out")
+        parallel_workers = st.slider("Parallel API calls", 1, 5, 3)
+        batch_size = st.slider("Events per API call", 5, 40, 20, help="Higher = fewer API calls but might time out")
         chunk_size = st.slider("Processing chunk size", 100, 2000, 500)
-        
-        with st.expander("Batch Size Calculator", expanded=False):
-            st.info("This will help you determine the optimal batch size to get all your events")
-            target_events = st.number_input("Target number of events", 10, 500, dataset_size)
-            available_api_calls = st.number_input("Available API calls", 1, 20, max_api_calls)
-            workers_count = st.number_input("Parallel workers", 1, 4, parallel_workers)
-            
-            min_batch_size = (target_events + (available_api_calls * workers_count) - 1) // (available_api_calls * workers_count)
-            st.success(f"To generate {target_events} events with {available_api_calls} API calls and {workers_count} workers, use a batch size of at least {min_batch_size}")
-            
-            if min_batch_size > 50:
-                st.warning(f"⚠️ A batch size of {min_batch_size} might cause timeouts. Consider increasing API calls or reducing target events.")
         
         st.header("API Settings")
         model_name = st.selectbox("OpenAI Model", 
@@ -205,7 +200,7 @@ def calculate_scores(chunk_df, weights, scoring_config):
     
     # Calculate Score_Chokepoint
     chokepoints = chunk_df.get('Chokepoint (if any)', pd.Series([''] * len(chunk_df)))
-    if 'Chokepoint' in chunk_df.columns and chokepoints.isna().all():
+    if chokepoints.isna().all() and 'Chokepoint' in chunk_df.columns:
         chokepoints = chunk_df['Chokepoint']
     
     # Use user-defined critical chokepoints
@@ -279,30 +274,6 @@ def calculate_scores(chunk_df, weights, scoring_config):
     choices = ['High', 'Medium']
     chunk_df['Warning Level'] = np.select(conditions, choices, default='Low')
     
-    # Calculate Trigger Reason - a text description of why this event has its warning level
-    def determine_trigger_reason(row):
-        reasons = []
-        if row['Score_Risk'] > 0:
-            reasons.append("High Risk Score")
-        if row['Score_Chokepoint'] > 0:
-            reasons.append("Critical Chokepoint")
-        if row['Score_RegionAnomaly'] > 0:
-            reasons.append("Critical Region")
-        if row['Score_ClusterAnomaly'] > 0:
-            reasons.append("Critical Cluster")
-        if row['Score_Season'] > 0:
-            reasons.append("High Impact Season")
-        
-        if not reasons:
-            return "Combined Factors"
-        elif len(reasons) == 1:
-            return reasons[0]
-        else:
-            return " & ".join(reasons[:2])
-    
-    # Apply the function to create the Trigger Reason column
-    chunk_df['Trigger Reason'] = chunk_df.apply(determine_trigger_reason, axis=1)
-    
     return chunk_df
 
 # ---- Extract JSON from response with improved error handling ----
@@ -349,21 +320,20 @@ def extract_json_from_response(text):
     # If all else fails
     raise ValueError("Could not extract valid JSON from the response")
 
-# ---- Generate batch of events with decade focus ----
+# ---- Generate batch of events with consistency and required fields ----
 def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2):
-    """Generate a batch of maritime events for a specific decade using OpenAI API with retry logic"""
+    """Generate a batch of maritime events using OpenAI API with retry logic and consistency"""
     
     # Add seed for consistency if provided
     seed_text = f" Use seed {seed} for consistency." if seed else ""
     
-    # Decade-focused prompt to ensure we get events from the specified timeframe
-    decade_name = f"{base_year}s"
-    
+    # Comprehensive prompt with all required fields and strong instruction for year range
     prompt = f"""
-    Generate a JSON array of {batch_size} maritime disruption events SPECIFICALLY from the {decade_name} (from {base_year} to {end_year} only).{seed_text}
-    Do NOT include events from other decades - ONLY events from {base_year} to {end_year}.
+    Generate a JSON array of {batch_size} maritime disruption events from {base_year} to {end_year}.{seed_text}
+    IMPORTANT: Events MUST be EVENLY distributed across the entire time period from {base_year} to {end_year}.
+    DO NOT focus only on recent years or early years - distribute events across ALL decades.
     
-    Include these fields in valid JSON format:
+    Include ALL of these EXACT field names in valid JSON format:
     - Event: brief description
     - Year(s): when it happened (MUST be between {base_year} and {end_year})
     - Region: maritime region affected
@@ -389,7 +359,7 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     - Duration_Months: numerical duration in months
     - Cluster Label: more specific event category
     - Start Year: year event started (MUST be between {base_year} and {end_year})
-    - Decade: "{decade_name}"
+    - Decade: which decade it occurred in (e.g. "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s")
     - Season: Winter, Spring, Summer, or Fall
     - Trend Flag: Yes/No if part of a trend
     - Risk Score: 1-10 scale
@@ -404,15 +374,15 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     
     for attempt in range(retries):
         try:
-            # Use a system message that enforces JSON-only response with shortened prompt
+            # Use a system message that enforces JSON-only response
             response = openai.ChatCompletion.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": "You are a maritime data generator. Return ONLY valid JSON with no additional text."},
+                    {"role": "system", "content": "You are a maritime data generator. Return ONLY valid JSON with no additional text. Make sure ALL required fields are included for EVERY event. DISTRIBUTE EVENTS EVENLY ACROSS ALL DECADES FROM 1960 to 2024."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=temperature,
-                max_tokens=4000   # Limit token usage
+                max_tokens=4000
             )
             
             # Get the content
@@ -420,7 +390,103 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
             
             # Try to parse the JSON
             try:
-                return extract_json_from_response(raw_content)
+                events = extract_json_from_response(raw_content)
+                
+                # Validate that all events have the required fields
+                required_fields = ['Event', 'Year(s)', 'Region', 'Affected Segment(s)', 
+                                  'Impact Summary', 'Event Category', 'Impact Level',
+                                  'Affected Commodity', 'Response Mechanism', 'Response Type',
+                                  'Start Month', 'End Month', 'Estimated Duration', 'Risk Type',
+                                  'Insurance Impact', 'Trade Routes Affected', 
+                                  'Positive Outcome / Opportunity', 'Source / Reference Link',
+                                  'AI Event Summary', 'RAG_Context', 'Chokepoint (if any)', 
+                                  'Cluster', 'Duration_Months', 'Cluster Label', 'Start Year',
+                                  'Decade', 'Season', 'Trend Flag', 'Risk Score', 
+                                  'lat', 'lon', 'Anomaly_ZScore', 'Anomaly_IsoForest', 'Anomaly_Detected']
+                
+                # Check for missing fields
+                valid_events = []
+                for event in events:
+                    missing_fields = [field for field in required_fields if field not in event]
+                    if not missing_fields:
+                        valid_events.append(event)
+                    else:
+                        # Add default values for missing fields
+                        for field in missing_fields:
+                            # Set default values based on field type
+                            if field == 'Impact Level':
+                                event[field] = 'Medium'
+                            elif field == 'Response Mechanism':
+                                event[field] = 'Reactive'
+                            elif field == 'Chokepoint (if any)':
+                                event[field] = 'None'
+                            elif field == 'Season':
+                                event[field] = 'Summer'
+                            elif field == 'Risk Score':
+                                event[field] = 5
+                            elif field == 'lat' or field == 'lon':
+                                event[field] = 0.0
+                            elif field == 'Start Year':
+                                try:
+                                    year_str = str(event.get('Year(s)', ''))
+                                    if '-' in year_str:
+                                        event[field] = int(year_str.split('-')[0])
+                                    else:
+                                        event[field] = int(year_str) if year_str.isdigit() else base_year
+                                except:
+                                    event[field] = base_year
+                            elif field == 'Decade':
+                                try:
+                                    start_yr = event.get('Start Year', 0)
+                                    if start_yr == 0 and 'Year(s)' in event:
+                                        year_str = str(event['Year(s)'])
+                                        if '-' in year_str:
+                                            start_yr = int(year_str.split('-')[0])
+                                        else:
+                                            start_yr = int(year_str) if year_str.isdigit() else base_year
+                                    
+                                    decade = (start_yr // 10) * 10
+                                    event[field] = f"{decade}s"
+                                except:
+                                    event[field] = f"{(base_year // 10) * 10}s"
+                            elif field == 'Trend Flag':
+                                event[field] = 'No'
+                            elif field == 'Anomaly_ZScore':
+                                event[field] = 0.0
+                            elif field == 'Anomaly_IsoForest':
+                                event[field] = 0.5
+                            elif field == 'Anomaly_Detected':
+                                event[field] = 'No'
+                            elif field == 'Duration_Months':
+                                event[field] = 1
+                            elif field == 'Start Month' or field == 'End Month':
+                                event[field] = 'January'
+                            elif field == 'Estimated Duration':
+                                event[field] = '1 month'
+                            else:
+                                event[field] = 'Unknown'
+                        valid_events.append(event)
+                
+                # Validate years are in the correct range and fix if necessary
+                for event in valid_events:
+                    # Fix Start Year if needed
+                    try:
+                        start_year_val = int(event['Start Year'])
+                        if start_year_val < base_year or start_year_val > end_year:
+                            # Assign a random year in the range
+                            event['Start Year'] = np.random.randint(base_year, end_year + 1)
+                    except:
+                        event['Start Year'] = np.random.randint(base_year, end_year + 1)
+                    
+                    # Update Decade based on Start Year
+                    decade = (int(event['Start Year']) // 10) * 10
+                    event['Decade'] = f"{decade}s"
+                    
+                    # Update Year(s) for consistency
+                    event['Year(s)'] = str(event['Start Year'])
+                
+                return valid_events
+                
             except Exception as json_error:
                 if attempt < retries - 1:
                     time.sleep(1)  # Short wait before retry
@@ -439,149 +505,119 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     
     return []
 
-# ---- Decade-focused event generation ----
-def generate_events_with_decades(total_size, workers=2, batch_size=20, consistency_seed=None, max_api_calls=3):
-    """Generate events with focus on covering all decades equally"""
+# ---- Create decade ranges for more comprehensive coverage ----
+def create_decade_ranges(start_year, end_year, distribution_type="even"):
+    """Create decade ranges based on the selected distribution type"""
+    # Define all possible decades
+    all_decades = []
+    for decade_start in range((start_year // 10) * 10, (end_year // 10) * 10 + 1, 10):
+        decade_end = min(decade_start + 9, end_year)
+        if decade_end >= start_year:  # Only include if part of the decade is in our range
+            all_decades.append((decade_start, decade_end))
+    
+    if distribution_type == "even":
+        # Return all decades with equal weight
+        return all_decades
+    
+    elif distribution_type == "more_recent":
+        # Weight decades by recency
+        weighted_decades = []
+        for i, decade in enumerate(all_decades):
+            # Add each decade multiple times based on its position
+            weight = i + 1  # 1 for earliest decade, increasing for more recent ones
+            weighted_decades.extend([decade] * weight)
+        return weighted_decades
+    
+    else:  # Random distribution
+        # Return all decades (random selection will happen later)
+        return all_decades
+
+# ---- Cost-optimized event generation with improved decade distribution ----
+def generate_events_with_limits(total_size, workers=2, batch_size=20, year_range=(1960, 2024), 
+                               distribution="even", consistency_seed=None, max_api_calls=7):
+    """Generate events with improved decade distribution and API call limits"""
     all_events = []
+    start_year, end_year = year_range
     
-    # Create decade ranges 
-    decades = [
-        (1960, 1969, "1960s"), 
-        (1970, 1979, "1970s"), 
-        (1980, 1989, "1980s"), 
-        (1990, 1999, "1990s"),
-        (2000, 2009, "2000s"), 
-        (2010, 2019, "2010s"), 
-        (2020, 2024, "2020s")
-    ]
+    # Calculate optimal batch distribution
+    events_per_api_call = min(batch_size * workers, total_size)
+    api_calls_needed = (total_size + events_per_api_call - 1) // events_per_api_call
+    api_calls_to_make = min(api_calls_needed, max_api_calls)
     
-    # Calculate events per decade - try to distribute evenly
-    num_decades = len(decades)
-    events_per_decade = total_size // num_decades
+    # Calculate total events we can generate with the API calls limit
+    events_to_generate = min(total_size, api_calls_to_make * events_per_api_call)
     
-    # Ensure at least some events per decade
-    events_per_decade = max(events_per_decade, 5)
+    if api_calls_to_make < api_calls_needed:
+        st.warning(f"⚠️ Limiting to {events_to_generate} events to stay within {max_api_calls} API calls. Adjust 'Maximum API Calls' in settings if you need more events.")
+    
+    # Create decade ranges based on selected distribution
+    if distribution == "Even across all decades":
+        dist_type = "even"
+    elif distribution == "More recent events":
+        dist_type = "more_recent"
+    else:
+        dist_type = "random"
+    
+    # Get decade ranges
+    all_decades = create_decade_ranges(start_year, end_year, dist_type)
+    
+    # Ensure we have at least one range
+    if not all_decades:
+        all_decades = [(start_year, end_year)]
+    
+    # Create batches to ensure coverage of all decades
+    batches = []
+    events_per_decade = events_to_generate // len(all_decades)
+    extra_events = events_to_generate % len(all_decades)
+    
+    # First distribute events_per_decade to each decade
+    for decade in all_decades:
+        remaining = events_per_decade
+        while remaining > 0:
+            current_batch = min(batch_size, remaining)
+            batches.append((current_batch, decade))
+            remaining -= current_batch
+    
+    # Then distribute any extra events
+    decade_idx = 0
+    for _ in range(extra_events):
+        # Find the first batch for the current decade and add 1
+        for i, batch in enumerate(batches):
+            if batch[1] == all_decades[decade_idx]:
+                new_size = batch[0] + 1
+                batches[i] = (new_size, batch[1])
+                break
+        decade_idx = (decade_idx + 1) % len(all_decades)
     
     # Progress indicators
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Generate events decade by decade to ensure coverage
-    decade_batches = []
-    
-    # If we have very limited API calls, we need to combine decades
-    if max_api_calls < num_decades:
-        # Group decades to fit within API call limit
-        decades_per_call = (num_decades + max_api_calls - 1) // max_api_calls
-        
-        # Create combined decade batches
-        for i in range(0, len(decades), decades_per_call):
-            combined_decades = decades[i:i+decades_per_call]
-            if combined_decades:
-                start_year = combined_decades[0][0]
-                end_year = combined_decades[-1][1]
-                decade_label = f"{combined_decades[0][2]}-{combined_decades[-1][2]}"
-                decade_batches.append((start_year, end_year, decade_label, events_per_decade * len(combined_decades)))
-    else:
-        # We have enough API calls for each decade
-        for start_year, end_year, decade_label in decades:
-            decade_batches.append((start_year, end_year, decade_label, events_per_decade))
-    
-    # Submit API calls for each decade batch
+    # Submit API calls in parallel
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        # Track progress
-        total_batches = len(decade_batches)
-        completed_batches = 0
+        # Use unique seeds derived from the main seed for consistency
+        future_to_batch = {
+            executor.submit(
+                generate_events_batch, 
+                batch[0], 
+                batch[1][0],  # decade start
+                batch[1][1],  # decade end
+                None if consistency_seed is None else consistency_seed + i
+            ): i for i, batch in enumerate(batches)
+        }
         
-        # Process each decade batch
-        for decade_idx, (start_year, end_year, decade_label, target_events) in enumerate(decade_batches):
+        # Process results as they complete
+        completed = 0
+        for future in as_completed(future_to_batch):
             try:
-                status_text.text(f"Generating events for {decade_label}...")
-                
-                # Calculate API calls needed for this decade batch
-                api_calls_for_decade = min(
-                    (target_events + batch_size - 1) // batch_size,  # Ceiling division
-                    max_api_calls // total_batches + (1 if decade_idx < max_api_calls % total_batches else 0)  # Fair distribution
-                )
-                
-                # Adjust batch size if needed
-                adjusted_batch_size = min(batch_size, (target_events + api_calls_for_decade - 1) // api_calls_for_decade)
-                
-                # Create sub-batches for this decade
-                sub_batches = []
-                remaining = target_events
-                for i in range(api_calls_for_decade):
-                    if remaining <= 0:
-                        break
-                    sub_batch_size = min(adjusted_batch_size, remaining)
-                    sub_batches.append(sub_batch_size)
-                    remaining -= sub_batch_size
-                
-                # Generate events for each sub-batch
-                decade_futures = []
-                for i, sub_batch_size in enumerate(sub_batches):
-                    if sub_batch_size > 0:
-                        # Create a unique seed for consistency if needed
-                        batch_seed = None if consistency_seed is None else consistency_seed + decade_idx * 1000 + i
-                        decade_futures.append(
-                            executor.submit(
-                                generate_events_batch,
-                                sub_batch_size,
-                                start_year,
-                                end_year,
-                                batch_seed
-                            )
-                        )
-                
-                # Collect results for this decade
-                decade_events = []
-                for future in as_completed(decade_futures):
-                    try:
-                        batch_events = future.result()
-                        # Ensure events are actually from this decade
-                        filtered_events = []
-                        for event in batch_events:
-                            # Try to get the year from different possible fields
-                            year = None
-                            if 'Start Year' in event and event['Start Year']:
-                                try:
-                                    year = int(event['Start Year'])
-                                except:
-                                    pass
-                            
-                            if year is None and 'Year(s)' in event and event['Year(s)']:
-                                try:
-                                    # Try to extract a year from the Year(s) field
-                                    year_str = str(event['Year(s)'])
-                                    year_match = re.search(r'\b(19\d\d|20[0-2]\d)\b', year_str)
-                                    if year_match:
-                                        year = int(year_match.group(1))
-                                except:
-                                    pass
-                            
-                            # Only add events that match the decade
-                            if year is not None and start_year <= year <= end_year:
-                                # Ensure the Decade field is set correctly
-                                event['Decade'] = decade_label
-                                filtered_events.append(event)
-                        
-                        decade_events.extend(filtered_events)
-                    except Exception as e:
-                        st.warning(f"⚠️ Error generating events for {decade_label}: {str(e)}")
-                
-                all_events.extend(decade_events)
-                
-                # Update progress
-                completed_batches += 1
-                progress = completed_batches / total_batches
+                batch_events = future.result()
+                all_events.extend(batch_events)
+                completed += 1
+                progress = completed / len(batches)
                 progress_bar.progress(progress)
-                status_text.text(f"Generated {len(decade_events)} events for {decade_label} ({int(progress*100)}% complete)")
-                
+                status_text.text(f"Generated {len(all_events)} events out of {events_to_generate} ({int(progress*100)}%)")
             except Exception as e:
-                st.warning(f"⚠️ Error processing {decade_label}: {str(e)}")
-    
-    # Final status update
-    status_text.text(f"Generated {len(all_events)} events across all decades")
+                st.warning(f"⚠️ Batch generation error: {str(e)}")
     
     return all_events
 
@@ -605,42 +641,6 @@ def process_dataframe_in_chunks(df, weights, scoring_config, chunk_size=500):
     # Combine results
     return pd.concat(result_dfs, ignore_index=True)
 
-# ---- Add missing columns with default values ----
-def ensure_all_columns_exist(df):
-    """Makes sure all required columns exist in the dataframe, adding empty ones if needed"""
-    required_columns = [
-        "Event", "Year(s)", "Region", "Affected Segment(s)", "Impact Summary", 
-        "Event Category", "Impact Level", "Affected Commodity", "Response Mechanism",
-        "Response Type", "Start Month", "End Month", "Estimated Duration", 
-        "Risk Type", "Insurance Impact", "Trade Routes Affected", 
-        "Positive Outcome / Opportunity", "Source / Reference Link",
-        "AI Event Summary", "RAG_Context", "Chokepoint (if any)", "Cluster",
-        "Duration_Months", "Cluster Label", "Start Year", "Decade", "Season",
-        "Trend Flag", "Risk Score", "lat", "lon", "Anomaly_ZScore",
-        "Anomaly_IsoForest", "Anomaly_Detected", "Score_Risk", "Score_Chokepoint",
-        "Score_Season", "Score_RegionAnomaly", "Score_ClusterAnomaly",
-        "Warning Score", "Warning Level", "Trigger Reason"
-    ]
-    
-    # Add any missing columns with empty values
-    for col in required_columns:
-        if col not in df.columns:
-            # Choose appropriate default value based on column name
-            if col in ["Score_Risk", "Score_Chokepoint", "Score_Season", 
-                      "Score_RegionAnomaly", "Score_ClusterAnomaly", "Warning Score",
-                      "lat", "lon", "Anomaly_ZScore", "Risk Score", "Duration_Months"]:
-                df[col] = 0
-            elif col in ["Anomaly_IsoForest"]:
-                df[col] = 0.0
-            elif col in ["Anomaly_Detected", "Trend Flag"]:
-                df[col] = "No"
-            elif col in ["Warning Level"]:
-                df[col] = "Low"
-            else:
-                df[col] = ""
-    
-    return df
-
 # --- Generate Dataset ---
 col1, col2 = st.columns([2, 1])
 with col1:
@@ -653,6 +653,8 @@ with col2:
             "scoring_config": scoring_config,
             "generation_settings": {
                 "dataset_size": dataset_size,
+                "year_range": [start_year, end_year],
+                "year_distribution": year_distribution,
                 "consistency_seed": consistency_seed if use_seed else "Not used",
                 "max_api_calls": max_api_calls,
                 "parallel_workers": parallel_workers,
@@ -663,20 +665,26 @@ with col2:
 
 if generate_button:
     try:
-        # Generate events with decade focus
-        st.subheader("Step 1: Generating Events By Decade")
+        # Generate events with improved decade distribution
+        st.subheader("Step 1: Generating Events")
         
-        # Calculate how many events we aim to get per decade
-        num_decades = 7  # 1960s through 2020s
-        events_per_decade = max(5, dataset_size // num_decades)
-        total_target = events_per_decade * num_decades
+        # Use dynamic year distribution
+        dist_type_map = {
+            "Even across all decades": "even",
+            "More recent events": "more_recent",
+            "Random distribution": "random"
+        }
         
-        st.info(f"🔄 Targeting approximately {events_per_decade} events per decade across 7 decades")
+        # Tell user what we're doing
+        st.info(f"🔄 Generating events from {start_year} to {end_year} with {year_distribution} distribution")
+        st.info(f"🔄 Using maximum {max_api_calls} API calls to balance coverage and costs")
         
-        events = generate_events_with_decades(
+        events = generate_events_with_limits(
             total_size=dataset_size,
             workers=parallel_workers,
             batch_size=batch_size,
+            year_range=(start_year, end_year),
+            distribution=year_distribution,
             consistency_seed=consistency_seed if use_seed else None,
             max_api_calls=max_api_calls
         )
@@ -687,45 +695,77 @@ if generate_button:
             # Convert to DataFrame
             df = pd.DataFrame(events)
             
-            # Ensure all requested columns exist
-            df = ensure_all_columns_exist(df)
+            # Ensure all required columns exist with appropriate default values
+            required_columns = ['Event', 'Year(s)', 'Region', 'Affected Segment(s)', 
+                              'Impact Summary', 'Event Category', 'Impact Level',
+                              'Affected Commodity', 'Response Mechanism', 'Response Type',
+                              'Start Month', 'End Month', 'Estimated Duration', 'Risk Type',
+                              'Insurance Impact', 'Trade Routes Affected', 
+                              'Positive Outcome / Opportunity', 'Source / Reference Link',
+                              'AI Event Summary', 'RAG_Context', 'Chokepoint (if any)', 
+                              'Cluster', 'Duration_Months', 'Cluster Label', 'Start Year',
+                              'Decade', 'Season', 'Trend Flag', 'Risk Score', 
+                              'lat', 'lon', 'Anomaly_ZScore', 'Anomaly_IsoForest', 'Anomaly_Detected']
+                               
+            for col in required_columns:
+                if col not in df.columns:
+                    # Add missing columns with appropriate default values
+                    if col == 'Impact Level':
+                        df[col] = 'Medium'
+                    elif col == 'Response Mechanism':
+                        df[col] = 'Reactive'
+                    elif col == 'Chokepoint (if any)':
+                        df[col] = 'None'
+                    elif col == 'Season':
+                        df[col] = 'Summer'
+                    elif col == 'Risk Score':
+                        df[col] = 5
+                    elif col == 'lat' or col == 'lon':
+                        df[col] = 0.0
+                    elif col == 'Decade':
+                        # Calculate decade based on Start Year
+                        if 'Start Year' in df.columns:
+                            df[col] = df['Start Year'].apply(lambda x: f"{(int(x) // 10) * 10}s")
+                        else:
+                            decades = [f"{d}0s" for d in range(196, 203)]
+                            df[col] = df['Year(s)'].apply(lambda x: next((d for d in decades if str(d)[0:3] in str(x)), "2020s"))
+                    elif col == 'Trend Flag':
+                        df[col] = 'No'
+                    elif col == 'Anomaly_ZScore':
+                        df[col] = np.random.uniform(-2, 2, len(df))
+                    elif col == 'Anomaly_IsoForest':
+                        df[col] = np.random.uniform(0, 1, len(df))
+                    elif col == 'Anomaly_Detected':
+                        df[col] = np.random.choice(['Yes', 'No'], len(df), p=[0.2, 0.8])
+                    elif col == 'Duration_Months':
+                        df[col] = np.random.randint(1, 24, len(df))
+                    elif col == 'Start Month':
+                        months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                 'July', 'August', 'September', 'October', 'November', 'December']
+                        df[col] = np.random.choice(months, len(df))
+                    elif col == 'End Month':
+                        months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                 'July', 'August', 'September', 'October', 'November', 'December']
+                        df[col] = np.random.choice(months, len(df))
+                    elif col == 'Start Year':
+                        # Extract the start year from Year(s)
+                        df[col] = df['Year(s)'].apply(lambda x: int(str(x).split('-')[0]) if '-' in str(x) else int(str(x)))
+                    else:
+                        df[col] = 'Unknown'
+            
+            # Run a validation to ensure all decade fields are correct
+            df['Decade'] = df['Start Year'].apply(lambda x: f"{(int(x) // 10) * 10}s")
             
             st.success(f"✅ Generated {len(df)} events successfully!")
+            
+            # Show decade distribution
+            decade_counts = df['Decade'].value_counts().sort_index()
+            st.subheader("Events by Decade")
+            st.bar_chart(decade_counts)
             
             # Process in chunks
             st.subheader("Step 2: Calculating Risk Scores")
             df = process_dataframe_in_chunks(df, weights, scoring_config, chunk_size)
-            
-            # Analyze decade distribution
-            st.subheader("Decade Distribution")
-            if 'Decade' in df.columns:
-                decade_counts = df['Decade'].value_counts().sort_index()
-                st.bar_chart(decade_counts)
-                
-                # Show decade summary
-                decade_col1, decade_col2 = st.columns([1, 2])
-                with decade_col1:
-                    st.write("Events by Decade:")
-                    decade_summary = pd.DataFrame({
-                        'Decade': decade_counts.index,
-                        'Events': decade_counts.values,
-                        'Percentage': (decade_counts.values / len(df) * 100).round(1)
-                    })
-                    st.dataframe(decade_summary)
-                
-                with decade_col2:
-                    # Calculate coverage
-                    missing_decades = []
-                    all_decades = ["1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"]
-                    for decade in all_decades:
-                        if decade not in decade_counts.index:
-                            missing_decades.append(decade)
-                    
-                    if missing_decades:
-                        st.warning(f"⚠️ Missing data for {len(missing_decades)} decades: {', '.join(missing_decades)}")
-                        st.info("Try increasing 'Maximum API Calls' to improve decade coverage.")
-                    else:
-                        st.success("✅ Data includes events from all decades (1960s-2020s)")
             
             # Store in session state
             st.session_state['maritime_events_df'] = df
@@ -750,16 +790,41 @@ if generate_button:
             download_cols = st.columns(2)
             
             with download_cols[0]:
-                # Excel download
+                # Excel download with complete data
                 excel_io = io.BytesIO()
                 with pd.ExcelWriter(excel_io, engine='openpyxl') as writer:
+                    # Write the main data
                     df.to_excel(writer, index=False, sheet_name="Maritime Events")
+                    
+                    # Write configuration to a separate sheet
+                    config_df = pd.DataFrame({
+                        "Parameter": ["Weights", "Scoring Configuration", "Dataset Size", "Year Range", "Distribution"],
+                        "Value": [
+                            str(weights),
+                            str(scoring_config),
+                            str(dataset_size),
+                            f"{start_year} to {end_year}",
+                            year_distribution
+                        ]
+                    })
+                    config_df.to_excel(writer, index=False, sheet_name="Configuration")
+                    
+                    # Add summary statistics
+                    warning_counts = df['Warning Level'].value_counts().reset_index()
+                    warning_counts.columns = ['Warning Level', 'Count']
+                    warning_counts.to_excel(writer, index=False, sheet_name="Summary")
+                    
+                    # Add decade distribution
+                    decade_df = df['Decade'].value_counts().sort_index().reset_index()
+                    decade_df.columns = ['Decade', 'Count']
+                    decade_df.to_excel(writer, index=False, sheet_name="Decade Distribution")
+                    
                 excel_io.seek(0)
                 
                 st.download_button(
-                    "📥 Download Excel",
+                    "📥 Download Complete Excel",
                     data=excel_io,
-                    file_name="maritime_events.xlsx",
+                    file_name="maritime_events_complete.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             
@@ -780,136 +845,38 @@ if generate_button:
         st.error(f"Error generating dataset: {str(e)}")
         st.error("Try adjusting the parameters or running again.")
 
-# Add basic visualization if data exists
+# Add enhanced visualization if data exists
 if 'maritime_events_df' in st.session_state:
     st.subheader("Data Visualization")
     viz_df = st.session_state['maritime_events_df']
     
     # Create tabs for different visualizations
-    viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["Warning Levels", "Impact Analysis", "Regional Distribution", "Decade Analysis"])
+    viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["Warning Levels", "Regions", "Timeline", "Decades"])
     
+    # Tab 1: Warning Level Distribution
     with viz_tab1:
-        # Warning Level Distribution
         if 'Warning Level' in viz_df.columns:
             st.write("Warning Level Distribution:")
             warning_counts = viz_df['Warning Level'].value_counts()
             st.bar_chart(warning_counts)
     
+    # Tab 2: Region Analysis
     with viz_tab2:
-        # Impact Level Distribution
-        if 'Impact Level' in viz_df.columns:
-            st.write("Impact Level Distribution:")
-            impact_counts = viz_df['Impact Level'].value_counts()
-            st.bar_chart(impact_counts)
-            
-        # Response Mechanism Distribution
-        if 'Response Mechanism' in viz_df.columns:
-            st.write("Response Mechanism Distribution:")
-            response_counts = viz_df['Response Mechanism'].value_counts()
-            st.bar_chart(response_counts)
-    
-    with viz_tab3:
-        # Regional Distribution
         if 'Region' in viz_df.columns:
-            st.write("Regional Distribution:")
-            region_counts = viz_df['Region'].value_counts().head(10)  # Top 10 regions
+            st.write("Events by Region:")
+            region_counts = viz_df['Region'].value_counts().head(10)
             st.bar_chart(region_counts)
-            
-        # Chokepoint Distribution
-        if 'Chokepoint (if any)' in viz_df.columns:
-            st.write("Chokepoint Distribution:")
-            # Filter out empty values
-            chokepoint_data = viz_df[viz_df['Chokepoint (if any)'].astype(str).str.strip() != '']
-            if not chokepoint_data.empty:
-                chokepoint_counts = chokepoint_data['Chokepoint (if any)'].value_counts().head(10)
-                st.bar_chart(chokepoint_counts)
-            else:
-                st.info("No chokepoint data available.")
-                
+    
+    # Tab 3: Timeline Analysis
+    with viz_tab3:
+        if 'Start Year' in viz_df.columns:
+            st.write("Events by Year:")
+            year_counts = viz_df['Start Year'].value_counts().sort_index()
+            st.line_chart(year_counts)
+    
+    # Tab 4: Decade Analysis
     with viz_tab4:
-        # Decade Analysis
         if 'Decade' in viz_df.columns:
             st.write("Events by Decade:")
             decade_counts = viz_df['Decade'].value_counts().sort_index()
             st.bar_chart(decade_counts)
-            
-            # Show decade breakdown with warning levels
-            st.write("Decade Breakdown by Warning Level:")
-            decade_warning = pd.crosstab(viz_df['Decade'], viz_df['Warning Level']).sort_index()
-            st.dataframe(decade_warning)
-            
-            # Decade timeline of events
-            if 'Start Year' in viz_df.columns:
-                st.write("Timeline of Events:")
-                # Convert to numeric if not already
-                try:
-                    viz_df['Start Year'] = pd.to_numeric(viz_df['Start Year'], errors='coerce')
-                    year_counts = viz_df['Start Year'].value_counts().sort_index()
-                    st.line_chart(year_counts)
-                except Exception as e:
-                    st.warning(f"Could not generate timeline: {str(e)}")
-                
-    # Add a download button for full column set
-    st.subheader("Column Selection for Download")
-    
-    # Group columns into categories for better organization
-    column_categories = {
-        "Basic Information": ["Event", "Year(s)", "Region", "Start Year", "Decade", "Season"],
-        "Impact Details": ["Impact Level", "Impact Summary", "Affected Segment(s)", "Affected Commodity", 
-                          "Trade Routes Affected", "Chokepoint (if any)"],
-        "Response Information": ["Response Mechanism", "Response Type", "Positive Outcome / Opportunity"],
-        "Timing and Duration": ["Start Month", "End Month", "Estimated Duration", "Duration_Months"],
-        "Risk and Warning": ["Risk Score", "Risk Type", "Warning Score", "Warning Level", "Trigger Reason"],
-        "Classification": ["Event Category", "Cluster", "Cluster Label"],
-        "Anomaly Detection": ["Anomaly_ZScore", "Anomaly_IsoForest", "Anomaly_Detected", "Trend Flag"],
-        "Score Components": ["Score_Risk", "Score_Chokepoint", "Score_Season", "Score_RegionAnomaly", "Score_ClusterAnomaly"],
-        "Other": ["lat", "lon", "Insurance Impact", "AI Event Summary", "RAG_Context", "Source / Reference Link"]
-    }
-    
-    # Create expandable sections for each category
-    selected_columns = []
-    for category, cols in column_categories.items():
-        with st.expander(category, expanded=(category == "Basic Information")):
-            # Filter to only include columns that exist in the dataframe
-            available_cols = [col for col in cols if col in viz_df.columns]
-            if available_cols:
-                selected = st.multiselect(
-                    f"Select {category} columns",
-                    options=available_cols,
-                    default=available_cols
-                )
-                selected_columns.extend(selected)
-    
-    # Custom download with selected columns
-    if selected_columns:
-        selected_df = viz_df[selected_columns]
-        
-        st.subheader("Download Custom Dataset")
-        custom_cols = st.columns(2)
-        
-        with custom_cols[0]:
-            # Excel download
-            excel_io = io.BytesIO()
-            with pd.ExcelWriter(excel_io, engine='openpyxl') as writer:
-                selected_df.to_excel(writer, index=False, sheet_name="Maritime Events")
-            excel_io.seek(0)
-            
-            st.download_button(
-                "📥 Download Custom Excel",
-                data=excel_io,
-                file_name="custom_maritime_events.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        with custom_cols[1]:
-            # CSV download
-            csv_io = io.BytesIO()
-            selected_df.to_csv(csv_io, index=False)
-            csv_io.seek(0)
-            
-            st.download_button(
-                "📥 Download Custom CSV",
-                data=csv_io,
-                file_name="custom_maritime_events.csv",
-                mime="text/csv"
-            )
