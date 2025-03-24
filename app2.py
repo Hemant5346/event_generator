@@ -261,6 +261,30 @@ def calculate_scores(chunk_df, weights, scoring_config):
     choices = ['High', 'Medium']
     chunk_df['Warning Level'] = np.select(conditions, choices, default='Low')
     
+    # Calculate Trigger Reason - a text description of why this event has its warning level
+    def determine_trigger_reason(row):
+        reasons = []
+        if row['Score_Risk'] > 0:
+            reasons.append("High Risk Score")
+        if row['Score_Chokepoint'] > 0:
+            reasons.append("Critical Chokepoint")
+        if row['Score_RegionAnomaly'] > 0:
+            reasons.append("Critical Region")
+        if row['Score_ClusterAnomaly'] > 0:
+            reasons.append("Critical Cluster")
+        if row['Score_Season'] > 0:
+            reasons.append("High Impact Season")
+        
+        if not reasons:
+            return "Combined Factors"
+        elif len(reasons) == 1:
+            return reasons[0]
+        else:
+            return " & ".join(reasons[:2])
+    
+    # Apply the function to create the Trigger Reason column
+    chunk_df['Trigger Reason'] = chunk_df.apply(determine_trigger_reason, axis=1)
+    
     return chunk_df
 
 # ---- Extract JSON from response with improved error handling ----
@@ -314,21 +338,44 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     # Add seed for consistency if provided
     seed_text = f" Use seed {seed} for consistency." if seed else ""
     
-    # Simplified prompt to reduce token usage
+    # Updated prompt to include all requested fields
     prompt = f"""
     Generate a JSON array of {batch_size} maritime disruption events from {base_year} to {end_year}.{seed_text}
     Include these fields in valid JSON format:
     - Event: brief description
     - Year(s): when it happened
     - Region: maritime region affected
+    - Affected Segment(s): part of maritime industry affected
+    - Impact Summary: brief summary of impact
+    - Event Category: category of the event
     - Impact Level: High, Medium, or Low
+    - Affected Commodity: main commodity affected
     - Response Mechanism: Proactive, Reactive, or Adaptive
+    - Response Type: specific type of response
+    - Start Month: month event started
+    - End Month: month event ended
+    - Estimated Duration: duration in months
+    - Risk Type: type of risk posed
+    - Insurance Impact: impact on insurance
+    - Trade Routes Affected: main trade routes affected
+    - Positive Outcome / Opportunity: any positive outcomes
+    - Source / Reference Link: leave blank or use placeholder
+    - AI Event Summary: AI-generated summary
+    - RAG_Context: contextual information
     - Chokepoint (if any): relevant shipping chokepoint
-    - Cluster Label: event category
-    - Season: Winter, Spring, Summer, or Fall
-    - Risk Score: 1-10 scale
+    - Cluster: general cluster category
+    - Duration_Months: numerical duration in months
+    - Cluster Label: more specific event category
+    - Start Year: year event started
     - Decade: which decade it occurred in
-    - lat, lon: rough coordinates
+    - Season: Winter, Spring, Summer, or Fall
+    - Trend Flag: Yes/No if part of a trend
+    - Risk Score: 1-10 scale
+    - lat: latitude coordinate (approximate)
+    - lon: longitude coordinate (approximate)
+    - Anomaly_ZScore: placeholder value between -3 and 3
+    - Anomaly_IsoForest: placeholder value between 0 and 1
+    - Anomaly_Detected: Yes/No if anomaly detected
 
     Return ONLY a valid JSON array with no additional text or explanations.
     """
@@ -337,12 +384,12 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
         try:
             # Use a system message that enforces JSON-only response with shortened prompt
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+                model=model_name,
                 messages=[
                     {"role": "system", "content": "You are a maritime data generator. Return ONLY valid JSON with no additional text."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,  # Lower temperature for consistency
+                temperature=temperature,
                 max_tokens=4000   # Limit token usage
             )
             
@@ -457,6 +504,42 @@ def process_dataframe_in_chunks(df, weights, scoring_config, chunk_size=500):
     # Combine results
     return pd.concat(result_dfs, ignore_index=True)
 
+# ---- Add missing columns with default values ----
+def ensure_all_columns_exist(df):
+    """Makes sure all required columns exist in the dataframe, adding empty ones if needed"""
+    required_columns = [
+        "Event", "Year(s)", "Region", "Affected Segment(s)", "Impact Summary", 
+        "Event Category", "Impact Level", "Affected Commodity", "Response Mechanism",
+        "Response Type", "Start Month", "End Month", "Estimated Duration", 
+        "Risk Type", "Insurance Impact", "Trade Routes Affected", 
+        "Positive Outcome / Opportunity", "Source / Reference Link",
+        "AI Event Summary", "RAG_Context", "Chokepoint (if any)", "Cluster",
+        "Duration_Months", "Cluster Label", "Start Year", "Decade", "Season",
+        "Trend Flag", "Risk Score", "lat", "lon", "Anomaly_ZScore",
+        "Anomaly_IsoForest", "Anomaly_Detected", "Score_Risk", "Score_Chokepoint",
+        "Score_Season", "Score_RegionAnomaly", "Score_ClusterAnomaly",
+        "Warning Score", "Warning Level", "Trigger Reason"
+    ]
+    
+    # Add any missing columns with empty values
+    for col in required_columns:
+        if col not in df.columns:
+            # Choose appropriate default value based on column name
+            if col in ["Score_Risk", "Score_Chokepoint", "Score_Season", 
+                      "Score_RegionAnomaly", "Score_ClusterAnomaly", "Warning Score",
+                      "lat", "lon", "Anomaly_ZScore", "Risk Score", "Duration_Months"]:
+                df[col] = 0
+            elif col in ["Anomaly_IsoForest"]:
+                df[col] = 0.0
+            elif col in ["Anomaly_Detected", "Trend Flag"]:
+                df[col] = "No"
+            elif col in ["Warning Level"]:
+                df[col] = "Low"
+            else:
+                df[col] = ""
+    
+    return df
+
 # --- Generate Dataset ---
 col1, col2 = st.columns([2, 1])
 with col1:
@@ -496,6 +579,10 @@ if generate_button:
         else:
             # Convert to DataFrame
             df = pd.DataFrame(events)
+            
+            # Ensure all requested columns exist
+            df = ensure_all_columns_exist(df)
+            
             st.success(f"✅ Generated {len(df)} events successfully!")
             
             # Process in chunks
@@ -560,8 +647,108 @@ if 'maritime_events_df' in st.session_state:
     st.subheader("Data Visualization")
     viz_df = st.session_state['maritime_events_df']
     
-    # Warning Level Distribution
-    if 'Warning Level' in viz_df.columns:
-        st.write("Warning Level Distribution:")
-        warning_counts = viz_df['Warning Level'].value_counts()
-        st.bar_chart(warning_counts)
+    # Create tabs for different visualizations
+    viz_tab1, viz_tab2, viz_tab3 = st.tabs(["Warning Levels", "Impact Analysis", "Regional Distribution"])
+    
+    with viz_tab1:
+        # Warning Level Distribution
+        if 'Warning Level' in viz_df.columns:
+            st.write("Warning Level Distribution:")
+            warning_counts = viz_df['Warning Level'].value_counts()
+            st.bar_chart(warning_counts)
+    
+    with viz_tab2:
+        # Impact Level Distribution
+        if 'Impact Level' in viz_df.columns:
+            st.write("Impact Level Distribution:")
+            impact_counts = viz_df['Impact Level'].value_counts()
+            st.bar_chart(impact_counts)
+            
+        # Response Mechanism Distribution
+        if 'Response Mechanism' in viz_df.columns:
+            st.write("Response Mechanism Distribution:")
+            response_counts = viz_df['Response Mechanism'].value_counts()
+            st.bar_chart(response_counts)
+    
+    with viz_tab3:
+        # Regional Distribution
+        if 'Region' in viz_df.columns:
+            st.write("Regional Distribution:")
+            region_counts = viz_df['Region'].value_counts().head(10)  # Top 10 regions
+            st.bar_chart(region_counts)
+            
+        # Chokepoint Distribution
+        if 'Chokepoint (if any)' in viz_df.columns:
+            st.write("Chokepoint Distribution:")
+            # Filter out empty values
+            chokepoint_data = viz_df[viz_df['Chokepoint (if any)'].astype(str).str.strip() != '']
+            if not chokepoint_data.empty:
+                chokepoint_counts = chokepoint_data['Chokepoint (if any)'].value_counts().head(10)
+                st.bar_chart(chokepoint_counts)
+            else:
+                st.info("No chokepoint data available.")
+                
+    # Add a download button for full column set
+    st.subheader("Column Selection for Download")
+    
+    # Group columns into categories for better organization
+    column_categories = {
+        "Basic Information": ["Event", "Year(s)", "Region", "Start Year", "Decade", "Season"],
+        "Impact Details": ["Impact Level", "Impact Summary", "Affected Segment(s)", "Affected Commodity", 
+                          "Trade Routes Affected", "Chokepoint (if any)"],
+        "Response Information": ["Response Mechanism", "Response Type", "Positive Outcome / Opportunity"],
+        "Timing and Duration": ["Start Month", "End Month", "Estimated Duration", "Duration_Months"],
+        "Risk and Warning": ["Risk Score", "Risk Type", "Warning Score", "Warning Level", "Trigger Reason"],
+        "Classification": ["Event Category", "Cluster", "Cluster Label"],
+        "Anomaly Detection": ["Anomaly_ZScore", "Anomaly_IsoForest", "Anomaly_Detected", "Trend Flag"],
+        "Score Components": ["Score_Risk", "Score_Chokepoint", "Score_Season", "Score_RegionAnomaly", "Score_ClusterAnomaly"],
+        "Other": ["lat", "lon", "Insurance Impact", "AI Event Summary", "RAG_Context", "Source / Reference Link"]
+    }
+    
+    # Create expandable sections for each category
+    selected_columns = []
+    for category, cols in column_categories.items():
+        with st.expander(category, expanded=(category == "Basic Information")):
+            # Filter to only include columns that exist in the dataframe
+            available_cols = [col for col in cols if col in viz_df.columns]
+            if available_cols:
+                selected = st.multiselect(
+                    f"Select {category} columns",
+                    options=available_cols,
+                    default=available_cols
+                )
+                selected_columns.extend(selected)
+    
+    # Custom download with selected columns
+    if selected_columns:
+        selected_df = viz_df[selected_columns]
+        
+        st.subheader("Download Custom Dataset")
+        custom_cols = st.columns(2)
+        
+        with custom_cols[0]:
+            # Excel download
+            excel_io = io.BytesIO()
+            with pd.ExcelWriter(excel_io, engine='openpyxl') as writer:
+                selected_df.to_excel(writer, index=False, sheet_name="Maritime Events")
+            excel_io.seek(0)
+            
+            st.download_button(
+                "📥 Download Custom Excel",
+                data=excel_io,
+                file_name="custom_maritime_events.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        with custom_cols[1]:
+            # CSV download
+            csv_io = io.BytesIO()
+            selected_df.to_csv(csv_io, index=False)
+            csv_io.seek(0)
+            
+            st.download_button(
+                "📥 Download Custom CSV",
+                data=csv_io,
+                file_name="custom_maritime_events.csv",
+                mime="text/csv"
+            )
