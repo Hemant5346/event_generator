@@ -126,7 +126,7 @@ with st.sidebar:
         
         st.header("API Settings")
         model_name = st.selectbox("OpenAI Model", 
-                                 ["gpt-3.5-turbo"], 
+                                 ["gpt-4o-mini"], 
                                  index=0)
         temperature = st.slider("Temperature", 0.0, 1.0, 0.5, 0.1)
 
