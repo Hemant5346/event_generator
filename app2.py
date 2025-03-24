@@ -99,17 +99,35 @@ with st.sidebar:
         dataset_size = st.slider("Number of events to generate", 10, 500, 50, 10)
         
         st.header("Cost Reduction Options")
-        st.info("💡 Smaller values = lower API costs")
+        st.info("💡 Adjust these settings to balance cost vs. dataset size")
         use_seed = st.checkbox("Use Seed for Consistency", value=True)
         consistency_seed = st.number_input("Consistency Seed", 1, 99999, 12345) if use_seed else None
-        max_api_calls = st.slider("Maximum API Calls", 1, 10, 3, help="Lower = cheaper, but might have to wait longer")
+        max_api_calls = st.slider("Maximum API Calls", 1, 20, 5, help="Higher = more data but more expensive")
+        
+        with st.expander("Advanced Generation Settings", expanded=False):
+            st.warning("If you're not getting enough events, increase these values:")
+            min_events_per_batch = st.slider("Minimum Events Per Batch", 5, 50, 25, 
+                                           help="Higher = more events per API call but may cause timeouts")
+            st.info(f"With current settings, you can generate approximately {min_events_per_batch * max_api_calls} events")
         
     # Tab 4: Advanced Settings
     with tab4:
         st.header("Performance Options")
-        parallel_workers = st.slider("Parallel API calls", 1, 3, 2)
-        batch_size = st.slider("Events per API call", 5, 40, 20, help="Higher = fewer API calls but might time out")
+        parallel_workers = st.slider("Parallel API calls", 1, 4, 2)
+        batch_size = st.slider("Events per API call", 10, 50, 30, help="Higher = fewer API calls but might time out")
         chunk_size = st.slider("Processing chunk size", 100, 2000, 500)
+        
+        with st.expander("Batch Size Calculator", expanded=False):
+            st.info("This will help you determine the optimal batch size to get all your events")
+            target_events = st.number_input("Target number of events", 10, 500, dataset_size)
+            available_api_calls = st.number_input("Available API calls", 1, 20, max_api_calls)
+            workers_count = st.number_input("Parallel workers", 1, 4, parallel_workers)
+            
+            min_batch_size = (target_events + (available_api_calls * workers_count) - 1) // (available_api_calls * workers_count)
+            st.success(f"To generate {target_events} events with {available_api_calls} API calls and {workers_count} workers, use a batch size of at least {min_batch_size}")
+            
+            if min_batch_size > 50:
+                st.warning(f"⚠️ A batch size of {min_batch_size} might cause timeouts. Consider increasing API calls or reducing target events.")
         
         st.header("API Settings")
         model_name = st.selectbox("OpenAI Model", 
@@ -331,19 +349,23 @@ def extract_json_from_response(text):
     # If all else fails
     raise ValueError("Could not extract valid JSON from the response")
 
-# ---- Generate batch of events with consistency ----
+# ---- Generate batch of events with decade focus ----
 def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2):
-    """Generate a batch of maritime events using OpenAI API with retry logic and consistency"""
+    """Generate a batch of maritime events for a specific decade using OpenAI API with retry logic"""
     
     # Add seed for consistency if provided
     seed_text = f" Use seed {seed} for consistency." if seed else ""
     
-    # Updated prompt to include all requested fields
+    # Decade-focused prompt to ensure we get events from the specified timeframe
+    decade_name = f"{base_year}s"
+    
     prompt = f"""
-    Generate a JSON array of {batch_size} maritime disruption events from {base_year} to {end_year}.{seed_text}
+    Generate a JSON array of {batch_size} maritime disruption events SPECIFICALLY from the {decade_name} (from {base_year} to {end_year} only).{seed_text}
+    Do NOT include events from other decades - ONLY events from {base_year} to {end_year}.
+    
     Include these fields in valid JSON format:
     - Event: brief description
-    - Year(s): when it happened
+    - Year(s): when it happened (MUST be between {base_year} and {end_year})
     - Region: maritime region affected
     - Affected Segment(s): part of maritime industry affected
     - Impact Summary: brief summary of impact
@@ -366,8 +388,8 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     - Cluster: general cluster category
     - Duration_Months: numerical duration in months
     - Cluster Label: more specific event category
-    - Start Year: year event started
-    - Decade: which decade it occurred in
+    - Start Year: year event started (MUST be between {base_year} and {end_year})
+    - Decade: "{decade_name}"
     - Season: Winter, Spring, Summer, or Fall
     - Trend Flag: Yes/No if part of a trend
     - Risk Score: 1-10 scale
@@ -417,70 +439,149 @@ def generate_events_batch(batch_size, base_year, end_year, seed=None, retries=2)
     
     return []
 
-# ---- Cost-optimized event generation with limits ----
-def generate_events_with_limits(total_size, workers=2, batch_size=20, consistency_seed=None, max_api_calls=3):
-    """Generate events with limits on API calls for cost optimization"""
+# ---- Decade-focused event generation ----
+def generate_events_with_decades(total_size, workers=2, batch_size=20, consistency_seed=None, max_api_calls=3):
+    """Generate events with focus on covering all decades equally"""
     all_events = []
     
-    # Calculate optimal batch distribution
-    events_per_api_call = min(batch_size * workers, total_size)
-    api_calls_needed = (total_size + events_per_api_call - 1) // events_per_api_call
-    api_calls_to_make = min(api_calls_needed, max_api_calls)
-    
-    # If we can't generate all events with the max API calls, adjust batch size
-    if api_calls_to_make < api_calls_needed:
-        events_to_generate = api_calls_to_make * events_per_api_call
-        st.warning(f"⚠️ Limiting to {events_to_generate} events to stay within {max_api_calls} API calls. Adjust 'Maximum API Calls' in settings if you need more events.")
-    else:
-        events_to_generate = total_size
-    
-    # Create decade ranges for more varied data
+    # Create decade ranges 
     decades = [
-        (1960, 1969), (1970, 1979), (1980, 1989), (1990, 1999),
-        (2000, 2009), (2010, 2019), (2020, 2024)
+        (1960, 1969, "1960s"), 
+        (1970, 1979, "1970s"), 
+        (1980, 1989, "1980s"), 
+        (1990, 1999, "1990s"),
+        (2000, 2009, "2000s"), 
+        (2010, 2019, "2010s"), 
+        (2020, 2024, "2020s")
     ]
     
-    # Create batches for the actual API calls
-    batches = []
-    decade_idx = 0
+    # Calculate events per decade - try to distribute evenly
+    num_decades = len(decades)
+    events_per_decade = total_size // num_decades
     
-    remaining = events_to_generate
-    while remaining > 0:
-        decade = decades[decade_idx]
-        batch = min(batch_size, remaining)
-        batches.append((batch, decade))
-        remaining -= batch
-        decade_idx = (decade_idx + 1) % len(decades)
+    # Ensure at least some events per decade
+    events_per_decade = max(events_per_decade, 5)
     
     # Progress indicators
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Submit API calls in parallel
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        # Use unique seeds derived from the main seed for consistency
-        future_to_batch = {
-            executor.submit(
-                generate_events_batch, 
-                batch_size, 
-                decade[0], 
-                decade[1],
-                None if consistency_seed is None else consistency_seed + i
-            ): i for i, (batch_size, decade) in enumerate(batches)
-        }
+    # Generate events decade by decade to ensure coverage
+    decade_batches = []
+    
+    # If we have very limited API calls, we need to combine decades
+    if max_api_calls < num_decades:
+        # Group decades to fit within API call limit
+        decades_per_call = (num_decades + max_api_calls - 1) // max_api_calls
         
-        # Process results as they complete
-        completed = 0
-        for future in as_completed(future_to_batch):
+        # Create combined decade batches
+        for i in range(0, len(decades), decades_per_call):
+            combined_decades = decades[i:i+decades_per_call]
+            if combined_decades:
+                start_year = combined_decades[0][0]
+                end_year = combined_decades[-1][1]
+                decade_label = f"{combined_decades[0][2]}-{combined_decades[-1][2]}"
+                decade_batches.append((start_year, end_year, decade_label, events_per_decade * len(combined_decades)))
+    else:
+        # We have enough API calls for each decade
+        for start_year, end_year, decade_label in decades:
+            decade_batches.append((start_year, end_year, decade_label, events_per_decade))
+    
+    # Submit API calls for each decade batch
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Track progress
+        total_batches = len(decade_batches)
+        completed_batches = 0
+        
+        # Process each decade batch
+        for decade_idx, (start_year, end_year, decade_label, target_events) in enumerate(decade_batches):
             try:
-                batch_events = future.result()
-                all_events.extend(batch_events)
-                completed += 1
-                progress = completed / len(batches)
+                status_text.text(f"Generating events for {decade_label}...")
+                
+                # Calculate API calls needed for this decade batch
+                api_calls_for_decade = min(
+                    (target_events + batch_size - 1) // batch_size,  # Ceiling division
+                    max_api_calls // total_batches + (1 if decade_idx < max_api_calls % total_batches else 0)  # Fair distribution
+                )
+                
+                # Adjust batch size if needed
+                adjusted_batch_size = min(batch_size, (target_events + api_calls_for_decade - 1) // api_calls_for_decade)
+                
+                # Create sub-batches for this decade
+                sub_batches = []
+                remaining = target_events
+                for i in range(api_calls_for_decade):
+                    if remaining <= 0:
+                        break
+                    sub_batch_size = min(adjusted_batch_size, remaining)
+                    sub_batches.append(sub_batch_size)
+                    remaining -= sub_batch_size
+                
+                # Generate events for each sub-batch
+                decade_futures = []
+                for i, sub_batch_size in enumerate(sub_batches):
+                    if sub_batch_size > 0:
+                        # Create a unique seed for consistency if needed
+                        batch_seed = None if consistency_seed is None else consistency_seed + decade_idx * 1000 + i
+                        decade_futures.append(
+                            executor.submit(
+                                generate_events_batch,
+                                sub_batch_size,
+                                start_year,
+                                end_year,
+                                batch_seed
+                            )
+                        )
+                
+                # Collect results for this decade
+                decade_events = []
+                for future in as_completed(decade_futures):
+                    try:
+                        batch_events = future.result()
+                        # Ensure events are actually from this decade
+                        filtered_events = []
+                        for event in batch_events:
+                            # Try to get the year from different possible fields
+                            year = None
+                            if 'Start Year' in event and event['Start Year']:
+                                try:
+                                    year = int(event['Start Year'])
+                                except:
+                                    pass
+                            
+                            if year is None and 'Year(s)' in event and event['Year(s)']:
+                                try:
+                                    # Try to extract a year from the Year(s) field
+                                    year_str = str(event['Year(s)'])
+                                    year_match = re.search(r'\b(19\d\d|20[0-2]\d)\b', year_str)
+                                    if year_match:
+                                        year = int(year_match.group(1))
+                                except:
+                                    pass
+                            
+                            # Only add events that match the decade
+                            if year is not None and start_year <= year <= end_year:
+                                # Ensure the Decade field is set correctly
+                                event['Decade'] = decade_label
+                                filtered_events.append(event)
+                        
+                        decade_events.extend(filtered_events)
+                    except Exception as e:
+                        st.warning(f"⚠️ Error generating events for {decade_label}: {str(e)}")
+                
+                all_events.extend(decade_events)
+                
+                # Update progress
+                completed_batches += 1
+                progress = completed_batches / total_batches
                 progress_bar.progress(progress)
-                status_text.text(f"Generated {len(all_events)} events out of {events_to_generate} ({int(progress*100)}%)")
+                status_text.text(f"Generated {len(decade_events)} events for {decade_label} ({int(progress*100)}% complete)")
+                
             except Exception as e:
-                st.warning(f"⚠️ Batch generation error: {str(e)}")
+                st.warning(f"⚠️ Error processing {decade_label}: {str(e)}")
+    
+    # Final status update
+    status_text.text(f"Generated {len(all_events)} events across all decades")
     
     return all_events
 
@@ -562,11 +663,17 @@ with col2:
 
 if generate_button:
     try:
-        # Generate events with API call limits
-        st.subheader("Step 1: Generating Events")
-        st.info(f"🔄 Using maximum {max_api_calls} API calls to minimize costs")
+        # Generate events with decade focus
+        st.subheader("Step 1: Generating Events By Decade")
         
-        events = generate_events_with_limits(
+        # Calculate how many events we aim to get per decade
+        num_decades = 7  # 1960s through 2020s
+        events_per_decade = max(5, dataset_size // num_decades)
+        total_target = events_per_decade * num_decades
+        
+        st.info(f"🔄 Targeting approximately {events_per_decade} events per decade across 7 decades")
+        
+        events = generate_events_with_decades(
             total_size=dataset_size,
             workers=parallel_workers,
             batch_size=batch_size,
@@ -588,6 +695,37 @@ if generate_button:
             # Process in chunks
             st.subheader("Step 2: Calculating Risk Scores")
             df = process_dataframe_in_chunks(df, weights, scoring_config, chunk_size)
+            
+            # Analyze decade distribution
+            st.subheader("Decade Distribution")
+            if 'Decade' in df.columns:
+                decade_counts = df['Decade'].value_counts().sort_index()
+                st.bar_chart(decade_counts)
+                
+                # Show decade summary
+                decade_col1, decade_col2 = st.columns([1, 2])
+                with decade_col1:
+                    st.write("Events by Decade:")
+                    decade_summary = pd.DataFrame({
+                        'Decade': decade_counts.index,
+                        'Events': decade_counts.values,
+                        'Percentage': (decade_counts.values / len(df) * 100).round(1)
+                    })
+                    st.dataframe(decade_summary)
+                
+                with decade_col2:
+                    # Calculate coverage
+                    missing_decades = []
+                    all_decades = ["1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"]
+                    for decade in all_decades:
+                        if decade not in decade_counts.index:
+                            missing_decades.append(decade)
+                    
+                    if missing_decades:
+                        st.warning(f"⚠️ Missing data for {len(missing_decades)} decades: {', '.join(missing_decades)}")
+                        st.info("Try increasing 'Maximum API Calls' to improve decade coverage.")
+                    else:
+                        st.success("✅ Data includes events from all decades (1960s-2020s)")
             
             # Store in session state
             st.session_state['maritime_events_df'] = df
@@ -648,7 +786,7 @@ if 'maritime_events_df' in st.session_state:
     viz_df = st.session_state['maritime_events_df']
     
     # Create tabs for different visualizations
-    viz_tab1, viz_tab2, viz_tab3 = st.tabs(["Warning Levels", "Impact Analysis", "Regional Distribution"])
+    viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["Warning Levels", "Impact Analysis", "Regional Distribution", "Decade Analysis"])
     
     with viz_tab1:
         # Warning Level Distribution
@@ -687,6 +825,29 @@ if 'maritime_events_df' in st.session_state:
                 st.bar_chart(chokepoint_counts)
             else:
                 st.info("No chokepoint data available.")
+                
+    with viz_tab4:
+        # Decade Analysis
+        if 'Decade' in viz_df.columns:
+            st.write("Events by Decade:")
+            decade_counts = viz_df['Decade'].value_counts().sort_index()
+            st.bar_chart(decade_counts)
+            
+            # Show decade breakdown with warning levels
+            st.write("Decade Breakdown by Warning Level:")
+            decade_warning = pd.crosstab(viz_df['Decade'], viz_df['Warning Level']).sort_index()
+            st.dataframe(decade_warning)
+            
+            # Decade timeline of events
+            if 'Start Year' in viz_df.columns:
+                st.write("Timeline of Events:")
+                # Convert to numeric if not already
+                try:
+                    viz_df['Start Year'] = pd.to_numeric(viz_df['Start Year'], errors='coerce')
+                    year_counts = viz_df['Start Year'].value_counts().sort_index()
+                    st.line_chart(year_counts)
+                except Exception as e:
+                    st.warning(f"Could not generate timeline: {str(e)}")
                 
     # Add a download button for full column set
     st.subheader("Column Selection for Download")
